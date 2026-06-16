@@ -1,68 +1,72 @@
 # podkop-sub2urltest
 
-🇬🇧 **English** · 🇷🇺 [Русский](README.ru.md)
+🇷🇺 **Русский** · 🇬🇧 [English](README.en.md)
 
-OpenWrt companion package for Podkop. It imports subscription URLs into a
-Podkop `urltest` or `selector` proxy section.
+Companion-пакет для OpenWrt + [Podkop](https://podkop.net). Берёт ссылку-подписку
+вашего VPN (subscription URL) и импортирует из неё ноды в Podkop-секцию
+`urltest` или `selector` через UCI.
 
-It also adds a separate LuCI page:
+Добавляет отдельную страницу в LuCI:
 
 ```text
-Services -> Podkop Subscriptions
+Службы → Podkop Subscriptions
 ```
 
-Supported subscription bodies:
+## Зачем это нужно
 
-- raw proxy URI lists: `vless://`, `ss://`, `trojan://`, `socks4://`,
+Podkop в режиме Proxy ждёт **готовые** proxy-ссылки (`vless://`, `ss://`,
+`trojan://`, …) или их список для URLTest/Selector. Обычную HTTPS-подписку вида
+`https://provider.example/api/sub/TOKEN` он напрямую не принимает.
+
+Этот пакет закрывает разрыв: скачивает подписку, разбирает её на отдельные ноды
+и записывает их в Podkop. Вы один раз вставляете ссылку-подписку — дальше Podkop
+сам получает актуальный список нод, автоматически по расписанию.
+
+## Что понимает на входе
+
+- сырые списки proxy-URI: `vless://`, `ss://`, `trojan://`, `socks4://`,
   `socks4a://`, `socks5://`, `hy2://`
-- base64 encoded proxy URI lists
-- common Mihomo/Clash YAML `proxies:` entries for `vless`, `trojan`,
-  `ss`/`shadowsocks`, and `hysteria2`/`hy2`
+- base64-кодированные списки proxy-URI
+- типичные Mihomo/Clash YAML `proxies:` для `vless`, `trojan`,
+  `ss`/`shadowsocks`, `hysteria2`/`hy2`
 
-It does not log subscription URLs or proxy links.
+Subscription URL и сами ноды в лог **не пишутся**.
 
-## Install without building an ipk
+## Установка (без сборки ipk)
 
-### Easiest install from GitHub
+### Проще всего — с GitHub
 
-Run this on the OpenWrt router (SSH as root):
+На роутере OpenWrt (SSH под root):
 
 ```sh
 wget -O /tmp/podkop-sub2urltest-install.sh https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main/remote-install.sh
 ash /tmp/podkop-sub2urltest-install.sh
 ```
 
-The installer asks for the subscription URL, writes it to
-`/etc/config/podkop-sub2urltest`, runs the first update, and enables periodic
-updates.
+Установщик ставит зависимости, спрашивает ссылку-подписку, пишет её в
+`/etc/config/podkop-sub2urltest`, делает первый импорт и включает периодические
+обновления.
 
-For non-interactive install:
+Без интерактива (ссылка через переменную окружения):
 
 ```sh
 wget -O /tmp/podkop-sub2urltest-install.sh https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main/remote-install.sh
 SUB_URL='https://provider.example/api/sub/TOKEN' ash /tmp/podkop-sub2urltest-install.sh
 ```
 
-If the installer was not edited before upload, pass the raw GitHub base URL:
+Повторный запуск установщика обновляет скрипт и **сохраняет** существующий
+конфиг (ссылку и ноды не трогает).
 
-```sh
-wget -O /tmp/podkop-sub2urltest-install.sh https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main/remote-install.sh
-PODKOP_SUB2URLTEST_BASE='https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main' \
-SUB_URL='https://provider.example/api/sub/TOKEN' ash /tmp/podkop-sub2urltest-install.sh
-```
+### Установка вручную
 
-Running the installer again updates the script and keeps the existing config.
-
-### Manual install
-
-Copy this directory to the router, then run:
+Скопировать папку на роутер и запустить:
 
 ```sh
 cd /path/to/podkop-sub2urltest
 ash install.sh
 ```
 
-Or copy the files manually:
+Либо скопировать файлы по отдельности:
 
 ```sh
 scp files/usr/bin/podkop-sub2urltest root@192.168.1.10:/usr/bin/
@@ -71,16 +75,16 @@ scp files/etc/init.d/podkop-sub2urltest root@192.168.1.10:/etc/init.d/
 ssh root@192.168.1.10 'chmod +x /usr/bin/podkop-sub2urltest /etc/init.d/podkop-sub2urltest'
 ```
 
-Install runtime dependencies:
+Зависимости:
 
 ```sh
 opkg update
 opkg install jq coreutils-base64 ca-bundle
 ```
 
-## Configure
+## Настройка
 
-Edit `/etc/config/podkop-sub2urltest`:
+Файл `/etc/config/podkop-sub2urltest`:
 
 ```uci
 config subscription 'main'
@@ -104,54 +108,56 @@ config subscription 'main'
 	option speedtest_timeout '10'
 ```
 
-Then run:
+Затем:
 
 ```sh
 podkop-sub2urltest update
 ```
 
-Enable periodic updates:
+Включить периодическое обновление:
 
 ```sh
 /etc/init.d/podkop-sub2urltest enable
 /etc/init.d/podkop-sub2urltest start
 ```
 
-## Commands
+## Команды
 
 ```sh
-podkop-sub2urltest update [section]     # fetch + import nodes into Podkop
-podkop-sub2urltest speedtest [section]  # measure real Mbit/s, drop slow nodes
-podkop-sub2urltest parse-file FILE      # debug: print parsed links from a file
+podkop-sub2urltest update [секция]     # скачать + импортировать ноды в Podkop
+podkop-sub2urltest speedtest [секция]  # замерить реальные Mbit/s, выкинуть медленные
+podkop-sub2urltest parse-file ФАЙЛ     # отладка: показать распарсенные ссылки
 ```
 
-## Options
+## Параметры
 
-| Option | Meaning |
-|--------|---------|
-| `user_agent` | Panels gate the real config on UA. `Sing-box/1.8.29` returns a base64 URI list (best for parsing). `ClashMetaForAndroid` may return Clash YAML or an "app not supported" placeholder. |
-| `hwid` | Sent as `X-Hwid`. Empty = a stable HWID is generated once (`/etc/podkop-sub2urltest.hwid.<section>`) so the router counts as ONE device. Set manually for HWID-limited subscriptions. |
-| `supported_transports` | Only these vless/trojan transports are kept. Podkop converts `tcp/raw,ws,grpc` only; `xhttp`/`httpupgrade`/`quic` nodes are dropped to avoid Podkop's "Unknown transport" error. Empty = no filter. |
-| `speedtest_enabled` | Enable real bandwidth testing of imported nodes. |
-| `speedtest_interval` | `off` (manual only) / `after_update` / `6h` / `12h` / `24h` / `weekly`. Time-based cadences install a cron line. |
-| `speedtest_min_mbps` | Nodes slower than this are removed from Podkop. |
-| `speedtest_url` / `speedtest_timeout` | Test file URL and per-node timeout (seconds). |
+| Параметр | Значение |
+|----------|----------|
+| `url` | Ссылка-подписка. Поле называется именно `url`. |
+| `user_agent` | Панели отдают разный конфиг по UA. `Sing-box/1.8.29` возвращает base64-список URI (лучше всего парсится). `ClashMetaForAndroid` может вернуть Clash YAML или заглушку «app not supported». |
+| `hwid` | Уходит как `X-Hwid`. Пусто = один раз генерируется стабильный HWID (`/etc/podkop-sub2urltest.hwid.<секция>`), роутер считается ОДНИМ устройством. Задать вручную для подписок с лимитом по HWID. |
+| `supported_transports` | Оставлять только эти vless/trojan-транспорты. Podkop умеет лишь `tcp/raw,ws,grpc`; ноды `xhttp`/`httpupgrade`/`quic` отбрасываются, чтобы не ловить «Unknown transport». Пусто = без фильтра. |
+| `speedtest_enabled` | Включить замер реальной полосы импортированных нод. |
+| `speedtest_interval` | `off` (только вручную) / `after_update` / `6h` / `12h` / `24h` / `weekly`. Временные варианты ставят строку в cron. |
+| `speedtest_min_mbps` | Ноды медленнее этого порога удаляются из Podkop. |
+| `speedtest_url` / `speedtest_timeout` | URL тестового файла и таймаут на ноду (секунды). |
 
-## Speed vs latency
+## Скорость против задержки
 
-Podkop URLTest selects the node with the lowest **latency**, not the highest
-**bandwidth**. A fast-ping node can still be slow. `speedtest` fills that gap: it
-spins a throwaway sing-box per node (reusing Podkop's own converted outbound),
-downloads `speedtest_url` through it, and prunes nodes below `speedtest_min_mbps`.
-Cost is ~4 min for ~28 nodes, and node speed fluctuates over time — that is why
-the schedule (`speedtest_interval`) exists.
+Podkop URLTest выбирает ноду с наименьшей **задержкой** (ping), а не наибольшей
+**полосой**. Нода с быстрым пингом может качать медленно. `speedtest` закрывает
+это: поднимает временный sing-box на каждую ноду (переиспользуя уже
+сконвертированный Podkop-outbound), качает `speedtest_url` через неё и выкидывает
+ноды ниже `speedtest_min_mbps`. ~4 мин на ~28 нод; скорость нод плавает во
+времени — поэтому есть расписание (`speedtest_interval`).
 
-## Notes
+## Заметки
 
-- `podkop_mode 'urltest'` writes `urltest_proxy_links`.
-- `podkop_mode 'selector'` writes `selector_proxy_links`.
-- `speedtest` requires `sing-box` (installed by Podkop) and `curl`.
-- Prefer raw/base64 URI lists over Mihomo YAML — they preserve provider-specific
-  URI parameters exactly. The Mihomo YAML parser is intentionally small (common
-  Remnawave-style VLESS Reality/TLS, Trojan, Shadowsocks, Hysteria2).
-- It does not log subscription URLs or proxy links.
+- `podkop_mode 'urltest'` пишет в `urltest_proxy_links`.
+- `podkop_mode 'selector'` пишет в `selector_proxy_links`.
+- `speedtest` требует `sing-box` (ставится вместе с Podkop) и `curl`.
+- Предпочтительнее сырые/base64 списки URI, а не Mihomo YAML — они точно
+  сохраняют специфичные для провайдера параметры URI. YAML-парсер намеренно
+  небольшой (типовые Remnawave-style VLESS Reality/TLS, Trojan, Shadowsocks,
+  Hysteria2).
+- Subscription URL и proxy-ссылки в лог не пишутся.
