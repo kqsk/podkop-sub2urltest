@@ -1,0 +1,14 @@
+{
+  "admin/services/podkop-sub2urltest": {
+    "title": "Подписки Podkop",
+    "order": 43,
+    "action": {
+      "type": "view",
+      "path": "podkop-sub2urltest"
+    },
+    "depends": {
+      "acl": [ "luci-app-podkop-sub2urltest" ],
+      "uci": { "podkop-sub2urltest": true }
+    }
+  }
+}

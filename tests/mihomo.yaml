@@ -1,0 +1,26 @@
+proxies:
+  - name: NL VLESS Reality
+    type: vless
+    server: nl.example.com
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+    network: tcp
+    tls: true
+    flow: xtls-rprx-vision
+    servername: www.cloudflare.com
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: publicKeyValue
+      short-id: abcd1234
+  - { name: US Trojan, type: trojan, server: us.example.com, port: 443, password: trojan-pass, network: ws, tls: true, ws-opts: { path: /trojan, headers: { Host: cdn.example.com } } }
+  - name: MD Shadowsocks
+    type: ss
+    server: md.example.com
+    port: 8388
+    cipher: chacha20-ietf-poly1305
+    password: ss-pass
+proxy-groups:
+  - name: Auto
+    type: url-test
+    proxies:
+      - NL VLESS Reality

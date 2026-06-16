@@ -1,0 +1,61 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+USE_PROCD=1
+
+CRON_FILE="/etc/crontabs/root"
+CRON_MARK="# podkop-sub2urltest-speedtest"
+
+# Install/refresh a cron line for scheduled speed tests based on the
+# speedtest_interval option of the 'main' subscription. off/after_update install
+# no line (after_update is handled inline by the updater).
+manage_cron() {
+	local interval schedule
+
+	interval="$(uci -q get podkop-sub2urltest.main.speedtest_interval)"
+
+	# drop any previous line of ours
+	if [ -f "$CRON_FILE" ]; then
+		sed -i "\|${CRON_MARK}|d" "$CRON_FILE" 2>/dev/null
+	fi
+
+	case "$interval" in
+		6h)     schedule="0 */6 * * *" ;;
+		12h)    schedule="0 */12 * * *" ;;
+		24h|1d) schedule="30 4 * * *" ;;
+		weekly) schedule="30 4 * * 0" ;;
+		*)      schedule="" ;;
+	esac
+
+	if [ -n "$schedule" ]; then
+		mkdir -p /etc/crontabs
+		echo "${schedule} /usr/bin/podkop-sub2urltest speedtest ${CRON_MARK}" >> "$CRON_FILE"
+		/etc/init.d/cron enable 2>/dev/null
+		/etc/init.d/cron reload 2>/dev/null || /etc/init.d/cron restart 2>/dev/null
+	fi
+}
+
+start_service() {
+	procd_open_instance
+	procd_set_param command /usr/bin/podkop-sub2urltest daemon
+	procd_set_param respawn 3600 5 5
+	procd_close_instance
+
+	manage_cron
+}
+
+stop_service() {
+	if [ -f "$CRON_FILE" ]; then
+		sed -i "\|${CRON_MARK}|d" "$CRON_FILE" 2>/dev/null
+		/etc/init.d/cron reload 2>/dev/null
+	fi
+}
+
+reload_service() {
+	manage_cron
+	/usr/bin/podkop-sub2urltest update
+}
+
+service_triggers() {
+	procd_add_reload_trigger podkop-sub2urltest
+}

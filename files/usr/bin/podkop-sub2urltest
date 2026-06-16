@@ -1,0 +1,906 @@
+#!/bin/ash
+
+CONFIG_NAME="podkop-sub2urltest"
+PODKOP_CONFIG="podkop"
+TMP_ROOT="/tmp/podkop-sub2urltest.d"
+LOGGER_TAG="podkop-sub2urltest"
+
+log() {
+	logger -t "$LOGGER_TAG" "$*"
+	printf '%s\n' "$*" >&2
+}
+
+die() {
+	log "error: $*"
+	exit 1
+}
+
+usage() {
+	cat <<'EOF'
+Usage:
+  podkop-sub2urltest update [subscription-section]
+  podkop-sub2urltest speedtest [subscription-section]
+  podkop-sub2urltest parse-file FILE
+  podkop-sub2urltest daemon
+
+speedtest measures real download speed of each already-imported node (via a
+throwaway sing-box) and drops nodes slower than speedtest_min_mbps from Podkop.
+
+The updater reads /etc/config/podkop-sub2urltest and writes nodes into
+/etc/config/podkop. It does not print subscription URLs or proxy links.
+EOF
+}
+
+require_cmd() {
+	command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+is_true() {
+	case "${1:-}" in
+		1|true|yes|on|enabled) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+url_encode() {
+	jq -nr --arg v "${1:-}" '$v|@uri'
+}
+
+b64_no_wrap() {
+	base64 | tr -d '\n'
+}
+
+append_param() {
+	local name="$1"
+	local value="${2:-}"
+
+	[ -n "$value" ] || return 0
+	if [ -n "${QUERY:-}" ]; then
+		QUERY="${QUERY}&${name}=$(url_encode "$value")"
+	else
+		QUERY="${name}=$(url_encode "$value")"
+	fi
+}
+
+strip_link_tail() {
+	sed -e 's/[),;]*$//' -e 's/&amp;/\&/g'
+}
+
+extract_share_urls() {
+	grep -Eoh '(vless|ss|trojan|socks4a?|socks5|hysteria2|hy2)://[^[:space:]<>"'"'"']+' "$1" 2>/dev/null | strip_link_tail
+}
+
+try_base64_decode() {
+	local input="$1"
+	local output="$2"
+	local data pad
+
+	data="$(tr -d '\r\n\t ' < "$input" | tr '_-' '/+')"
+	case $(( ${#data} % 4 )) in
+		2) pad="==" ;;
+		3) pad="=" ;;
+		*) pad="" ;;
+	esac
+
+	printf '%s%s' "$data" "$pad" | base64 -d > "$output" 2>/dev/null
+}
+
+mihomo_records() {
+	awk '
+	function trim(s) {
+		gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", s)
+		return s
+	}
+	function strip(s) {
+		s=trim(s)
+		gsub(/,$/, "", s)
+		gsub(/^[\047"]|[\047"]$/, "", s)
+		gsub(/^[{]+|[}]+$/, "", s)
+		return trim(s)
+	}
+	function norm(k) {
+		k=tolower(trim(k))
+		gsub(/[- ]/, "_", k)
+		return k
+	}
+	function emit(k, v, parent, nk) {
+		nk=norm(k)
+		v=strip(v)
+		if (v == "") return
+
+		if (parent == "reality_opts") {
+			if (nk == "public_key") nk="public_key"
+			else if (nk == "short_id") nk="short_id"
+		} else if (parent == "ws_opts") {
+			if (nk == "path") nk="path"
+		} else if (parent == "headers") {
+			if (nk == "host") nk="host"
+		} else if (parent == "grpc_opts") {
+			if (nk == "grpc_service_name") nk="grpc_service_name"
+		} else if (parent == "h2_opts") {
+			if (nk == "host") nk="host"
+			else if (nk == "path") nk="path"
+		}
+
+		if (nk == "client_fingerprint") nk="client_fingerprint"
+		if (nk == "skip_cert_verify") nk="skip_cert_verify"
+		if (nk == "sni") nk="servername"
+
+		print nk "=" v
+	}
+	function parse_pairs(s, parent, parts, i, p, pos, k, v, nested_parent, n) {
+		gsub(/^[ \t]*[{]/, "", s)
+		gsub(/[}][ \t]*$/, "", s)
+		n=split(s, parts, ",")
+		for (i = 1; i <= n; i++) {
+			p=trim(parts[i])
+			if (p == "") continue
+			pos=index(p, ":")
+			if (pos == 0) continue
+			k=substr(p, 1, pos - 1)
+			v=substr(p, pos + 1)
+			if (v ~ /^[ \t]*[{]/ && index(v, ":") > 0) {
+				nested_parent=norm(k)
+				gsub(/^[ \t]*[{]/, "", v)
+				parse_pairs(v, nested_parent)
+			} else {
+				emit(k, v, parent)
+			}
+		}
+	}
+	function parse_line(line, parent, pos, k, v) {
+		line=trim(line)
+		pos=index(line, ":")
+		if (pos == 0) return
+		k=substr(line, 1, pos - 1)
+		v=substr(line, pos + 1)
+		if (v ~ /^[ \t]*[{]/ && index(v, ":") > 0) {
+			parse_pairs(v, norm(k))
+		} else if (trim(v) != "") {
+			emit(k, v, parent)
+		}
+	}
+	function flush() {
+		if (in_node) print "__NODE_END__"
+		in_node=0
+		parent=""
+	}
+	/^[[:space:]]*proxies:[[:space:]]*(#.*)?$/ {
+		in_proxies=1
+		next
+	}
+	in_proxies && /^[A-Za-z0-9_-]+:[[:space:]]*/ {
+		flush()
+		exit
+	}
+	in_proxies {
+		line=$0
+		if (line ~ /^[[:space:]]*-[[:space:]]*[{]/) {
+			flush()
+			in_node=1
+			parent=""
+			print "__NODE_BEGIN__"
+			sub(/^[^{]*[{]/, "", line)
+			sub(/[}][[:space:]]*$/, "", line)
+			parse_pairs(line, "")
+			next
+		}
+		if (line ~ /^[[:space:]]*-[[:space:]]*/) {
+			flush()
+			in_node=1
+			parent=""
+			print "__NODE_BEGIN__"
+			sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+			parse_line(line, "")
+			next
+		}
+		if (!in_node) next
+		if (line ~ /^[[:space:]]+[A-Za-z0-9_-]+:[[:space:]]*(#.*)?$/) {
+			sub(/^[[:space:]]+/, "", line)
+			sub(/:.*/, "", line)
+			parent=norm(line)
+			next
+		}
+		if (line ~ /^[[:space:]]+[A-Za-z0-9_-]+:[[:space:]]*/) {
+			parse_line(line, parent)
+			next
+		}
+	}
+	END {
+		flush()
+	}
+	' "$1"
+}
+
+reset_node_fields() {
+	name=""
+	type=""
+	server=""
+	port=""
+	uuid=""
+	password=""
+	cipher=""
+	network=""
+	tls=""
+	reality=""
+	servername=""
+	client_fingerprint=""
+	public_key=""
+	short_id=""
+	flow=""
+	path=""
+	host=""
+	grpc_service_name=""
+	skip_cert_verify=""
+	obfs=""
+	obfs_password=""
+}
+
+set_node_field() {
+	case "$1" in
+		name) name="$2" ;;
+		type) type="$2" ;;
+		server) server="$2" ;;
+		port) port="$2" ;;
+		uuid) uuid="$2" ;;
+		password) password="$2" ;;
+		cipher|method) cipher="$2" ;;
+		network) network="$2" ;;
+		tls) tls="$2" ;;
+		reality) reality="$2" ;;
+		servername) servername="$2" ;;
+		client_fingerprint) client_fingerprint="$2" ;;
+		public_key) public_key="$2" ;;
+		short_id) short_id="$2" ;;
+		flow) flow="$2" ;;
+		path) path="$2" ;;
+		host) host="$2" ;;
+		grpc_service_name) grpc_service_name="$2" ;;
+		skip_cert_verify) skip_cert_verify="$2" ;;
+		obfs) obfs="$2" ;;
+		obfs_password) obfs_password="$2" ;;
+	esac
+}
+
+security_param() {
+	if [ -n "$public_key" ] || is_true "$reality"; then
+		printf 'reality'
+	elif is_true "$tls"; then
+		printf 'tls'
+	else
+		printf 'none'
+	fi
+}
+
+build_vless_link() {
+	[ -n "$uuid" ] && [ -n "$server" ] && [ -n "$port" ] || return 1
+
+	QUERY=""
+	append_param encryption "none"
+	append_param security "$(security_param)"
+	append_param type "${network:-tcp}"
+	append_param sni "$servername"
+	append_param fp "$client_fingerprint"
+	append_param pbk "$public_key"
+	append_param sid "$short_id"
+	append_param flow "$flow"
+	append_param path "$path"
+	append_param host "$host"
+	append_param serviceName "$grpc_service_name"
+	if is_true "$skip_cert_verify"; then
+		append_param allowInsecure "1"
+	fi
+
+	printf 'vless://%s@%s:%s?%s#%s\n' "$uuid" "$server" "$port" "$QUERY" "$(url_encode "${name:-vless}")"
+}
+
+build_trojan_link() {
+	[ -n "$password" ] && [ -n "$server" ] && [ -n "$port" ] || return 1
+
+	QUERY=""
+	append_param security "$(security_param)"
+	append_param type "${network:-tcp}"
+	append_param sni "$servername"
+	append_param fp "$client_fingerprint"
+	append_param path "$path"
+	append_param host "$host"
+	append_param serviceName "$grpc_service_name"
+	if is_true "$skip_cert_verify"; then
+		append_param allowInsecure "1"
+	fi
+
+	printf 'trojan://%s@%s:%s?%s#%s\n' "$(url_encode "$password")" "$server" "$port" "$QUERY" "$(url_encode "${name:-trojan}")"
+}
+
+build_ss_link() {
+	[ -n "$cipher" ] && [ -n "$password" ] && [ -n "$server" ] && [ -n "$port" ] || return 1
+
+	local userinfo
+	userinfo="$(printf '%s:%s' "$cipher" "$password" | b64_no_wrap)"
+	printf 'ss://%s@%s:%s#%s\n' "$userinfo" "$server" "$port" "$(url_encode "${name:-ss}")"
+}
+
+build_hy2_link() {
+	[ -n "$password" ] && [ -n "$server" ] && [ -n "$port" ] || return 1
+
+	QUERY=""
+	append_param sni "$servername"
+	append_param obfs "$obfs"
+	append_param obfs-password "$obfs_password"
+	if is_true "$skip_cert_verify"; then
+		append_param insecure "1"
+	fi
+
+	if [ -n "$QUERY" ]; then
+		printf 'hysteria2://%s@%s:%s?%s#%s\n' "$(url_encode "$password")" "$server" "$port" "$QUERY" "$(url_encode "${name:-hy2}")"
+	else
+		printf 'hysteria2://%s@%s:%s#%s\n' "$(url_encode "$password")" "$server" "$port" "$(url_encode "${name:-hy2}")"
+	fi
+}
+
+build_node_link() {
+	type="$(printf '%s' "$type" | tr 'A-Z' 'a-z')"
+	network="$(printf '%s' "$network" | tr 'A-Z' 'a-z')"
+
+	case "$type" in
+		vless) build_vless_link ;;
+		trojan) build_trojan_link ;;
+		ss|shadowsocks) build_ss_link ;;
+		hysteria2|hy2) build_hy2_link ;;
+		*) return 1 ;;
+	esac
+}
+
+parse_mihomo_to_links() {
+	local input="$1"
+	local output="$2"
+	local line key value
+
+	reset_node_fields
+	mihomo_records "$input" | while IFS= read -r line; do
+		case "$line" in
+			__NODE_BEGIN__)
+				reset_node_fields
+				;;
+			__NODE_END__)
+				build_node_link >> "$output" 2>/dev/null || true
+				reset_node_fields
+				;;
+			*=*)
+				key="${line%%=*}"
+				value="${line#*=}"
+				set_node_field "$key" "$value"
+				;;
+		esac
+	done
+}
+
+# Podkop's sing_box_config_facade.sh only maps vless/trojan transports
+# tcp/raw, ws and grpc. A link with any other `type=` (xhttp, httpupgrade, http,
+# quic, h2, splithttp...) makes podkop log "Unknown transport '<t>' detected" and
+# yields a broken outbound. Drop those links here so the urltest stays clean.
+# allowed = comma list; empty disables filtering. Links without a type= are kept
+# (they default to tcp, e.g. ss/hysteria2).
+filter_transports() {
+	local file="$1"
+	local allowed="$2"
+
+	[ -n "$allowed" ] || return 0
+	awk -v allowed=",${allowed}," '
+		{
+			t=""
+			if (match($0, /[?&]type=[A-Za-z0-9_]+/)) {
+				t=substr($0, RSTART, RLENGTH)
+				sub(/.*type=/, "", t)
+			}
+			if (t == "" || index(allowed, "," t ",") > 0) {
+				print
+			} else {
+				dropped[t]++
+			}
+		}
+		END {
+			for (k in dropped)
+				printf "dropping %d node(s) with unsupported transport %s\n", dropped[k], k > "/dev/stderr"
+		}
+	' "$file" > "${file}.flt" 2>>"${TMP_ROOT}/filter.log"
+	mv "${file}.flt" "$file"
+}
+
+collect_links_from_file() {
+	local input="$1"
+	local output="$2"
+	local allowed_transports="${3:-}"
+	local decoded="${TMP_ROOT}/decoded.$$"
+
+	: > "$output"
+	extract_share_urls "$input" >> "$output" || true
+
+	if [ ! -s "$output" ] && try_base64_decode "$input" "$decoded"; then
+		extract_share_urls "$decoded" >> "$output" || true
+	fi
+
+	if [ ! -s "$output" ]; then
+		parse_mihomo_to_links "$input" "$output"
+	fi
+
+	awk 'NF && !seen[$0]++' "$output" > "${output}.dedup"
+	mv "${output}.dedup" "$output"
+	filter_transports "$output" "$allowed_transports"
+	[ -f "${TMP_ROOT}/filter.log" ] && { while IFS= read -r l; do log "$l"; done < "${TMP_ROOT}/filter.log"; rm -f "${TMP_ROOT}/filter.log"; }
+	rm -f "$decoded"
+}
+
+fetch_subscription() {
+	local url="$1"
+	local output="$2"
+	local user_agent="${3:-Sing-box/1.8.29}"
+	local hwid="${4:-}"
+	local h_os="X-Device-Os: Android"
+	local h_ver="X-Ver-Os: 15"
+	local h_model="X-Device-Model: OpenWrt"
+	local h_locale="X-Device-Locale: en"
+
+	# Header-capable clients first: panels (Remnawave/Marzban) gate the real
+	# config on User-Agent and on X-Hwid (device limit). uclient-fetch cannot
+	# send custom headers, so it is the last resort and HWID-less.
+	if command -v curl >/dev/null 2>&1; then
+		set -- -fsSL -A "$user_agent" \
+			-H "$h_os" -H "$h_ver" -H "$h_model" -H "$h_locale"
+		[ -n "$hwid" ] && set -- "$@" -H "X-Hwid: $hwid"
+		curl "$@" "$url" -o "$output"
+	elif command -v wget >/dev/null 2>&1 && wget --help 2>&1 | grep -q -- '--header'; then
+		set -- -q -O "$output" --user-agent="$user_agent" \
+			--header="$h_os" --header="$h_ver" --header="$h_model" --header="$h_locale"
+		[ -n "$hwid" ] && set -- "$@" --header="X-Hwid: $hwid"
+		wget "$@" "$url"
+	elif command -v uclient-fetch >/dev/null 2>&1; then
+		[ -n "$hwid" ] && log "warning: uclient-fetch cannot send X-Hwid; install curl for device-limited subscriptions"
+		uclient-fetch -q -O "$output" --user-agent="$user_agent" "$url"
+	else
+		die "missing downloader: install curl (recommended) or wget"
+	fi
+}
+
+# Stable per-subscription HWID so the panel counts the router as ONE device
+# across updates instead of burning a device slot on every refresh.
+resolve_hwid() {
+	local section="$1"
+	local configured="$2"
+	local store="/etc/podkop-sub2urltest.hwid.${section}"
+	local value
+
+	if [ -n "$configured" ]; then
+		printf '%s\n' "$configured"
+		return 0
+	fi
+	if [ -s "$store" ]; then
+		cat "$store"
+		return 0
+	fi
+	value="$(tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 32)"
+	[ -n "$value" ] || value="$(date +%s)$$"
+	( umask 077; printf '%s\n' "$value" > "$store" ) 2>/dev/null || true
+	printf '%s\n' "$value"
+}
+
+ensure_podkop_section() {
+	local section="$1"
+
+	if ! uci -q get "${PODKOP_CONFIG}.${section}" >/dev/null 2>&1; then
+		uci set "${PODKOP_CONFIG}.${section}=section"
+	fi
+}
+
+write_links_to_podkop() {
+	local section="$1"
+	local mode="$2"
+	local links_file="$3"
+	local max_nodes="${4:-0}"
+	local test_url="${5:-https://cp.cloudflare.com/generate_204}"
+	local test_interval="${6:-1m}"
+	local test_tolerance="${7:-50}"
+	local option_name count next_count link
+
+	case "$mode" in
+		selector)
+			option_name="selector_proxy_links"
+			;;
+		urltest|url-test|url_test)
+			mode="urltest"
+			option_name="urltest_proxy_links"
+			;;
+		*)
+			die "unsupported podkop_mode '$mode'; use urltest or selector"
+			;;
+	esac
+
+	ensure_podkop_section "$section"
+	uci set "${PODKOP_CONFIG}.${section}.connection_type=proxy"
+	uci set "${PODKOP_CONFIG}.${section}.proxy_config_type=${mode}"
+	uci -q delete "${PODKOP_CONFIG}.${section}.proxy_string"
+	uci -q delete "${PODKOP_CONFIG}.${section}.selector_proxy_links"
+	uci -q delete "${PODKOP_CONFIG}.${section}.urltest_proxy_links"
+
+	if [ "$mode" = "urltest" ]; then
+		uci set "${PODKOP_CONFIG}.${section}.urltest_testing_url=${test_url}"
+		uci set "${PODKOP_CONFIG}.${section}.urltest_check_interval=${test_interval}"
+		uci set "${PODKOP_CONFIG}.${section}.urltest_tolerance=${test_tolerance}"
+	fi
+
+	count=0
+	while IFS= read -r link; do
+		[ -n "$link" ] || continue
+		next_count=$((count + 1))
+		if [ "$max_nodes" -gt 0 ] && [ "$next_count" -gt "$max_nodes" ]; then
+			break
+		fi
+		count="$next_count"
+		uci add_list "${PODKOP_CONFIG}.${section}.${option_name}=${link}" >/dev/null
+	done < "$links_file"
+
+	uci commit "$PODKOP_CONFIG"
+	printf '%s\n' "$count"
+}
+
+update_one() {
+	local section="$1"
+	local enabled url podkop_section podkop_mode user_agent restart_podkop hwid
+	local max_nodes test_url test_interval test_tolerance body links count
+	local supported_transports
+
+	config_get_bool enabled "$section" enabled 0
+	[ "$enabled" -eq 1 ] || return 0
+
+	config_get url "$section" url ""
+	config_get podkop_section "$section" podkop_section "main"
+	config_get podkop_mode "$section" podkop_mode "urltest"
+	config_get user_agent "$section" user_agent "Sing-box/1.8.29"
+	config_get hwid "$section" hwid ""
+	hwid="$(resolve_hwid "$section" "$hwid")"
+	config_get_bool restart_podkop "$section" restart_podkop 1
+	config_get max_nodes "$section" max_nodes "0"
+	config_get test_url "$section" test_url "https://cp.cloudflare.com/generate_204"
+	config_get test_interval "$section" test_interval "1m"
+	config_get test_tolerance "$section" test_tolerance "50"
+	config_get supported_transports "$section" supported_transports "tcp,raw,ws,grpc"
+
+	[ -n "$url" ] || die "subscription '$section' has empty url"
+
+	mkdir -p "$TMP_ROOT"
+	body="${TMP_ROOT}/${section}.body"
+	links="${TMP_ROOT}/${section}.links"
+
+	log "updating subscription '$section' into podkop section '$podkop_section'"
+	fetch_subscription "$url" "$body" "$user_agent" "$hwid" || die "failed to fetch subscription '$section'"
+	collect_links_from_file "$body" "$links" "$supported_transports"
+	[ -s "$links" ] || die "subscription '$section' produced no supported nodes"
+
+	count="$(write_links_to_podkop "$podkop_section" "$podkop_mode" "$links" "$max_nodes" "$test_url" "$test_interval" "$test_tolerance")"
+	log "wrote $count node(s) into podkop section '$podkop_section'"
+
+	rm -f "$body" "$links"
+
+	if [ "$restart_podkop" -eq 1 ] && [ -x /etc/init.d/podkop ]; then
+		/etc/init.d/podkop restart
+	fi
+
+	# Optional: speed-test right after import and prune slow nodes.
+	local st_enabled st_interval
+	config_get_bool st_enabled "$section" speedtest_enabled 0
+	config_get st_interval "$section" speedtest_interval "off"
+	if [ "$st_enabled" -eq 1 ] && [ "$st_interval" = "after_update" ]; then
+		if wait_podkop_ready "$podkop_section" "$count" 30; then
+			speedtest_one "$section"
+		else
+			log "speedtest skipped: podkop did not rebuild $count node(s) in time"
+		fi
+	fi
+}
+
+# Poll podkop's generated sing-box config until it exposes the expected number of
+# outbounds for a section (it is rebuilt asynchronously on restart).
+wait_podkop_ready() {
+	local section="$1" expected="$2" deadline="${3:-30}"
+	local config_path have i=0
+
+	config_path="$(podkop_config_path)"
+	while [ "$i" -lt "$deadline" ]; do
+		have="$(jq -r --arg s "$section" \
+			'[.outbounds[] | .tag // empty
+			  | select(startswith($s+"-") and endswith("-out"))
+			  | select((ltrimstr($s+"-") | rtrimstr("-out") | tonumber?) != null)] | length' \
+			"$config_path" 2>/dev/null)"
+		[ "${have:-0}" = "$expected" ] && return 0
+		i=$((i + 1))
+		sleep 1
+	done
+	return 1
+}
+
+update_all() {
+	require_cmd jq
+	require_cmd base64
+	require_cmd uci
+
+	. /lib/functions.sh
+	config_load "$CONFIG_NAME"
+	config_foreach update_one subscription
+}
+
+# ---- real per-node speed test -------------------------------------------
+#
+# Podkop already converts every node into a valid sing-box outbound inside its
+# generated config (reality/grpc/ws and all). We reuse those outbounds: extract
+# one by tag, wrap it in a throwaway sing-box with a local SOCKS inbound on a
+# private port, download a test object through it and measure real Mbit/s. The
+# live podkop instance is never touched. Logs carry only node tags + speeds,
+# never URIs/secrets.
+
+SPEEDTEST_PORT="${SPEEDTEST_PORT:-21080}"
+SPEEDTEST_LOCK="/tmp/podkop-sub2urltest.speedtest.lock"
+
+podkop_config_path() {
+	local p
+	p="$(uci -q get "${PODKOP_CONFIG}.settings.config_path")"
+	[ -n "$p" ] || p="/etc/sing-box/config.json"
+	printf '%s\n' "$p"
+}
+
+# port_busy PORT -> 0 if a local TCP socket is LISTENing on PORT.
+# Reads /proc/net/tcp{,6} directly (no netstat/ss dependency). local_address is
+# column 2 as IP:PORT in hex; state 0A = TCP_LISTEN.
+port_busy() {
+	local hexport
+	hexport="$(printf ':%04X$' "$1")"
+	cat /proc/net/tcp /proc/net/tcp6 2>/dev/null \
+		| awk -v p="$hexport" '$4=="0A" && $2 ~ p {f=1} END{exit f?0:1}'
+}
+
+# Pick a free TCP port starting at SPEEDTEST_PORT. Prevents collisions with a
+# leftover sing-box or anything else squatting the default port.
+pick_free_port() {
+	local base="${SPEEDTEST_PORT:-21080}" p i=0
+	p="$base"
+	while [ "$i" -lt 20 ]; do
+		port_busy "$p" || { printf '%s\n' "$p"; return 0; }
+		p=$((p + 1))
+		i=$((i + 1))
+	done
+	printf '%s\n' "$base"
+}
+
+# speedtest_node CONFIG_PATH TAG URL TIMEOUT -> prints integer Mbit/s
+speedtest_node() {
+	local config_path="$1" tag="$2" url="$3" timeout="$4"
+	local tmp="${TMP_ROOT}/st.$$.json" pid sp i ready
+
+	jq -c --arg t "$tag" \
+		'{log:{level:"fatal"},inbounds:[{type:"mixed",listen:"127.0.0.1",listen_port:('"$SPEEDTEST_PORT"')}],outbounds:[(.outbounds[]|select(.tag==$t))]}' \
+		"$config_path" > "$tmp" 2>/dev/null
+	if [ ! -s "$tmp" ] || ! grep -q '"server"' "$tmp"; then
+		rm -f "$tmp"
+		printf '0\n'
+		return 1
+	fi
+
+	sing-box run -c "$tmp" >/dev/null 2>&1 &
+	pid=$!
+
+	ready=0
+	i=0
+	while [ "$i" -lt 8 ]; do
+		if curl -s -x "socks5h://127.0.0.1:${SPEEDTEST_PORT}" -o /dev/null \
+			--max-time 2 "http://cp.cloudflare.com/generate_204" 2>/dev/null; then
+			ready=1
+			break
+		fi
+		i=$((i + 1))
+		sleep 1
+	done
+
+	sp=0
+	if [ "$ready" = 1 ]; then
+		sp="$(curl -s -x "socks5h://127.0.0.1:${SPEEDTEST_PORT}" -o /dev/null \
+			-w '%{speed_download}' --max-time "$timeout" "$url" 2>/dev/null)"
+	fi
+
+	kill "$pid" 2>/dev/null
+	wait "$pid" 2>/dev/null
+	rm -f "$tmp"
+
+	awk -v s="${sp:-0}" 'BEGIN { printf "%d\n", s * 8 / 1000000 }'
+}
+
+speedtest_one() {
+	local section="$1"
+	local enabled podkop_section podkop_mode min_mbps url timeout restart_podkop
+	local config_path option_name links_file survivors n_links tags n_tags
+	local i link tag mbps kept dropped
+
+	config_get_bool enabled "$section" speedtest_enabled 0
+	[ "$enabled" -eq 1 ] || return 0
+
+	# Serialize: only one speedtest at a time. Concurrent runs (manual button +
+	# after_update + cron) used to fight over the SOCKS port -> the loser's
+	# sing-box could not bind -> every node read 0 Mbit/s and got dropped, or one
+	# run pruned the list mid-flight and the other died on "node count mismatch".
+	# flock -n: if another run holds it, skip cleanly (return 0, not a failure).
+	# If flock is somehow unavailable, proceed unlocked rather than block forever.
+	if command -v flock >/dev/null 2>&1; then
+		exec 9>"$SPEEDTEST_LOCK"
+		if ! flock -n 9; then
+			log "speedtest '$section': another speedtest is already running, skipping"
+			return 0
+		fi
+	fi
+
+	# Use a guaranteed-free port instead of the fixed default, so a leftover
+	# sing-box (or any squatter) can't make every node fail to connect.
+	SPEEDTEST_PORT="$(pick_free_port)"
+
+	config_get podkop_section "$section" podkop_section "main"
+	config_get podkop_mode "$section" podkop_mode "urltest"
+	config_get min_mbps "$section" speedtest_min_mbps "20"
+	config_get url "$section" speedtest_url "https://speed.cloudflare.com/__down?bytes=20000000"
+	config_get timeout "$section" speedtest_timeout "10"
+	config_get_bool restart_podkop "$section" restart_podkop 1
+
+	case "$podkop_mode" in
+		selector) option_name="selector_proxy_links" ;;
+		*) podkop_mode="urltest"; option_name="urltest_proxy_links" ;;
+	esac
+
+	config_path="$(podkop_config_path)"
+	[ -s "$config_path" ] || die "podkop sing-box config not found ($config_path); run update first"
+
+	mkdir -p "$TMP_ROOT"
+	links_file="${TMP_ROOT}/${section}.stlinks"
+	survivors="${TMP_ROOT}/${section}.stkeep"
+	uci -q get "${PODKOP_CONFIG}.${podkop_section}.${option_name}" | tr ' ' '\n' | grep -v '^$' > "$links_file"
+	n_links="$(grep -c '' "$links_file")"
+	[ "$n_links" -gt 0 ] || die "no nodes in ${PODKOP_CONFIG}.${podkop_section}.${option_name}; run update first"
+
+	# guard: podkop outbound count for this section must match the list length,
+	# otherwise our index->tag mapping is wrong and we must not prune blindly.
+	# router jq is built without regex (oniguruma) so test() is unavailable.
+	# Match "<section>-<N>-out" with string ops: strip the prefix/suffix and
+	# require the middle to be a number (tonumber? yields empty on failure).
+	n_tags="$(jq -r --arg s "$podkop_section" \
+		'[.outbounds[] | .tag // empty
+		  | select(startswith($s+"-") and endswith("-out"))
+		  | select((ltrimstr($s+"-") | rtrimstr("-out") | tonumber?) != null)] | length' \
+		"$config_path" 2>/dev/null)"
+	if [ "${n_tags:-0}" != "$n_links" ]; then
+		die "node count mismatch (list=$n_links, podkop outbounds=$n_tags); refusing to prune. Run update, then speedtest."
+	fi
+
+	require_cmd sing-box
+	require_cmd curl
+
+	log "speedtest '$section': testing $n_links node(s), keep >= ${min_mbps} Mbit/s"
+	: > "$survivors"
+	kept=0
+	dropped=0
+	i=0
+	while IFS= read -r link; do
+		i=$((i + 1))
+		tag="${podkop_section}-${i}-out"
+		mbps="$(speedtest_node "$config_path" "$tag" "$url" "$timeout")"
+		if [ "${mbps:-0}" -ge "$min_mbps" ] 2>/dev/null; then
+			printf '%s\n' "$link" >> "$survivors"
+			kept=$((kept + 1))
+			log "speedtest $tag: ${mbps} Mbit/s -> keep"
+		else
+			dropped=$((dropped + 1))
+			log "speedtest $tag: ${mbps} Mbit/s -> drop"
+		fi
+	done < "$links_file"
+
+	if [ ! -s "$survivors" ]; then
+		rm -f "$links_file" "$survivors"
+		die "speedtest dropped ALL nodes (threshold ${min_mbps} too high?); podkop list left unchanged"
+	fi
+
+	uci -q delete "${PODKOP_CONFIG}.${podkop_section}.${option_name}"
+	while IFS= read -r link; do
+		[ -n "$link" ] && uci add_list "${PODKOP_CONFIG}.${podkop_section}.${option_name}=${link}" >/dev/null
+	done < "$survivors"
+	uci commit "$PODKOP_CONFIG"
+	log "speedtest '$section': kept $kept, dropped $dropped"
+
+	rm -f "$links_file" "$survivors"
+
+	if [ "$restart_podkop" -eq 1 ] && [ -x /etc/init.d/podkop ]; then
+		/etc/init.d/podkop restart
+	fi
+}
+
+speedtest_all() {
+	require_cmd jq
+	require_cmd uci
+	require_cmd sing-box
+
+	. /lib/functions.sh
+	config_load "$CONFIG_NAME"
+	config_foreach speedtest_one subscription
+}
+
+parse_file_cmd() {
+	local input="$1"
+	local output="${TMP_ROOT}/parse-file.$$.links"
+
+	require_cmd jq
+	require_cmd base64
+	mkdir -p "$TMP_ROOT"
+	collect_links_from_file "$input" "$output"
+	cat "$output"
+	rm -f "$output"
+}
+
+interval_seconds() {
+	local interval
+
+	. /lib/functions.sh
+	config_load "$CONFIG_NAME"
+	config_get interval main update_interval "21600"
+	case "$interval" in
+		*s) printf '%s\n' "${interval%s}" ;;
+		*m) printf '%s\n' "$(( ${interval%m} * 60 ))" ;;
+		*h) printf '%s\n' "$(( ${interval%h} * 3600 ))" ;;
+		*d) printf '%s\n' "$(( ${interval%d} * 86400 ))" ;;
+		*) printf '%s\n' "$interval" ;;
+	esac
+}
+
+daemon_cmd() {
+	local sleep_for
+
+	while :; do
+		update_all || true
+		sleep_for="$(interval_seconds)"
+		[ "$sleep_for" -gt 0 ] 2>/dev/null || sleep_for=21600
+		sleep "$sleep_for"
+	done
+}
+
+case "${1:-}" in
+	update)
+		if [ -n "${2:-}" ]; then
+			require_cmd jq
+			require_cmd base64
+			require_cmd uci
+			. /lib/functions.sh
+			config_load "$CONFIG_NAME"
+			update_one "$2"
+		else
+			update_all
+		fi
+		;;
+	parse-file)
+		[ -n "${2:-}" ] || die "parse-file requires FILE"
+		parse_file_cmd "$2"
+		;;
+	speedtest)
+		if [ -n "${2:-}" ]; then
+			require_cmd jq
+			require_cmd uci
+			require_cmd sing-box
+			. /lib/functions.sh
+			config_load "$CONFIG_NAME"
+			speedtest_one "$2"
+		else
+			speedtest_all
+		fi
+		;;
+	daemon)
+		daemon_cmd
+		;;
+	-h|--help|help|"")
+		usage
+		;;
+	*)
+		usage
+		exit 1
+		;;
+esac

@@ -1,0 +1,5 @@
+# Everything in this repo is consumed on Linux/OpenWrt. Force LF so shell
+# scripts never get CRLF line endings (ash/sh break on \r).
+* text=auto eol=lf
+*.sh text eol=lf
+podkop-sub2urltest text eol=lf

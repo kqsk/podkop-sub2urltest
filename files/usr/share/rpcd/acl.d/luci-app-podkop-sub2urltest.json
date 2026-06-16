@@ -1,0 +1,20 @@
+{
+  "luci-app-podkop-sub2urltest": {
+    "description": "Grant access to Podkop subscription importer",
+    "read": {
+      "file": {
+        "/usr/bin/podkop-sub2urltest": [ "exec" ]
+      },
+      "uci": [
+        "podkop-sub2urltest",
+        "podkop"
+      ]
+    },
+    "write": {
+      "uci": [
+        "podkop-sub2urltest",
+        "podkop"
+      ]
+    }
+  }
+}
