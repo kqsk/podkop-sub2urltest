@@ -1,5 +1,7 @@
 # podkop-sub2urltest
 
+🇬🇧 **English** · 🇷🇺 [Русский](README.ru.md)
+
 OpenWrt companion package for Podkop. It imports subscription URLs into a
 Podkop `urltest` or `selector` proxy section.
 
