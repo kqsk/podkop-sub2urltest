@@ -646,13 +646,14 @@ update_one() {
 	if [ "$st_enabled" -eq 1 ] && [ "$st_interval" = "after_update" ]; then
 		# detached: podkop needs ~1 min to rebuild and the test ~25 min, LuCI's
 		# "update now" call must not wait for that
+		# 1000>&-: drop the procd service lock fd inherited from reload, or LuCI save hangs until the speedtest ends
 		(
 			if wait_podkop_ready "$podkop_section" "$count" 180 "${TMP_ROOT}/${section}.updated"; then
 				speedtest_one "$section"
 			else
 				log "speedtest skipped: podkop did not rebuild $count node(s) in time"
 			fi
-		) </dev/null >/dev/null 2>&1 &
+		) </dev/null >/dev/null 2>&1 1000>&- &
 	fi
 }
 
@@ -924,6 +925,11 @@ daemon_cmd() {
 	local sleep_for
 
 	while :; do
+		# daily: cron runs the update at 04:00 (see init.d), daemon stays idle
+		if [ "$(uci -q get "$CONFIG_NAME.main.update_interval")" = "daily" ]; then
+			sleep 3600
+			continue
+		fi
 		update_all || true
 		sleep_for="$(interval_seconds)"
 		[ "$sleep_for" -gt 0 ] 2>/dev/null || sleep_for=21600

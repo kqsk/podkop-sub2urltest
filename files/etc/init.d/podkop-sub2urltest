@@ -5,19 +5,24 @@ USE_PROCD=1
 
 CRON_FILE="/etc/crontabs/root"
 CRON_MARK="# podkop-sub2urltest-speedtest"
+CRON_MARK_UPDATE="# podkop-sub2urltest-update"
 
 # Install/refresh a cron line for scheduled speed tests based on the
 # speedtest_interval option of the 'main' subscription. off/after_update install
 # no line (after_update is handled inline by the updater).
 manage_cron() {
-	local interval schedule
+	local interval schedule update_line=""
 
 	interval="$(uci -q get podkop-sub2urltest.main.speedtest_interval)"
 
 	# drop any previous line of ours
 	if [ -f "$CRON_FILE" ]; then
-		sed -i "\|${CRON_MARK}|d" "$CRON_FILE" 2>/dev/null
+		sed -i -e "\|${CRON_MARK}|d" -e "\|${CRON_MARK_UPDATE}|d" "$CRON_FILE" 2>/dev/null
 	fi
+
+	# update_interval=daily: subscriptions update at night instead of every N hours
+	[ "$(uci -q get podkop-sub2urltest.main.update_interval)" = "daily" ] && \
+		update_line="0 4 * * * /usr/bin/podkop-sub2urltest update ${CRON_MARK_UPDATE}"
 
 	case "$interval" in
 		6h)     schedule="0 */6 * * *" ;;
@@ -27,9 +32,10 @@ manage_cron() {
 		*)      schedule="" ;;
 	esac
 
-	if [ -n "$schedule" ]; then
+	if [ -n "$schedule" ] || [ -n "$update_line" ]; then
 		mkdir -p /etc/crontabs
-		echo "${schedule} /usr/bin/podkop-sub2urltest speedtest ${CRON_MARK}" >> "$CRON_FILE"
+		[ -n "$schedule" ] && echo "${schedule} /usr/bin/podkop-sub2urltest speedtest ${CRON_MARK}" >> "$CRON_FILE"
+		[ -n "$update_line" ] && echo "$update_line" >> "$CRON_FILE"
 		/etc/init.d/cron enable 2>/dev/null
 		/etc/init.d/cron reload 2>/dev/null || /etc/init.d/cron restart 2>/dev/null
 	fi
@@ -46,7 +52,7 @@ start_service() {
 
 stop_service() {
 	if [ -f "$CRON_FILE" ]; then
-		sed -i "\|${CRON_MARK}|d" "$CRON_FILE" 2>/dev/null
+		sed -i -e "\|${CRON_MARK}|d" -e "\|${CRON_MARK_UPDATE}|d" "$CRON_FILE" 2>/dev/null
 		/etc/init.d/cron reload 2>/dev/null
 	fi
 }
