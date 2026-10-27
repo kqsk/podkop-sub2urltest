@@ -22,12 +22,13 @@ return view.extend({
     o.default = "0";
     o.rmempty = false;
 
-    o = s.option(form.Value, "url", _("Ссылка на подписку"));
+    o = s.option(form.DynamicList, "url", _("Ссылки на подписки"));
+    o.description = _("Можно добавить несколько: серверы из всех подписок складываются в один список");
     o.placeholder = "https://provider.example/api/sub/TOKEN";
-    o.password = true;
     o.rmempty = false;
     o.validate = function (_section_id, value) {
-      if (!value) return _("Укажите ссылку на подписку");
+      // DynamicList also validates its empty "add" field: empty is not an error
+      if (!value) return true;
       if (value.indexOf("https://") !== 0 && value.indexOf("http://") !== 0)
         return _("Ссылка должна начинаться с http:// или https://");
       return true;
@@ -96,6 +97,10 @@ return view.extend({
     o.value("", _("Без фильтра (оставить все)"));
     o.default = "tcp,raw,ws,grpc";
     o.description = _("Узлы с транспортом не из списка (xhttp, httpupgrade, quic…) отбрасываются — Podkop их не конвертирует и ругается «Unknown transport».");
+
+    o = s.option(form.Value, "exclude_keywords", _("Игнорировать серверы со словами"));
+    o.default = "🇷🇺,Россия,Москва,Питер,Обход,обход,Авто,авто,Осталось,осталось,дней,Истекает,Трафик,Проверяйте,🇦🇶,Антарктика";
+    o.description = _("Через запятую. Сервер пропускается, если его название содержит любое из слов (служебные строки, российские и «обходные» серверы). Регистр важен.");
 
     o = s.option(form.Flag, "restart_podkop", _("Перезапускать Podkop после обновления"));
     o.default = "1";

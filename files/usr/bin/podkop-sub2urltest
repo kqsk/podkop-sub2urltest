@@ -4,6 +4,8 @@ CONFIG_NAME="podkop-sub2urltest"
 PODKOP_CONFIG="podkop"
 TMP_ROOT="/tmp/podkop-sub2urltest.d"
 LOGGER_TAG="podkop-sub2urltest"
+# service/RU/bypass entries providers mix into subscriptions
+DEFAULT_EXCLUDE="🇷🇺,Россия,Москва,Питер,Обход,обход,Авто,авто,Осталось,осталось,дней,Истекает,Трафик,Проверяйте,🇦🇶,Антарктика"
 
 log() {
 	logger -t "$LOGGER_TAG" "$*"
@@ -407,6 +409,39 @@ filter_transports() {
 	mv "${file}.flt" "$file"
 }
 
+# filter_excluded FILE "kw1,kw2,..." -> drops links whose name (#fragment,
+# URL-decoded) contains any keyword. Case-sensitive: busybox has no unicode
+# case folding, so list both "Обход" and "обход" if needed.
+filter_excluded() {
+	local file="$1" keywords="$2" before after
+	[ -n "$keywords" ] || return 0
+	before="$(grep -c '' "$file")"
+	awk -v kws="$keywords" '
+		BEGIN {
+			for (i = 0; i < 256; i++) hex[sprintf("%02X", i)] = i
+			n = split(kws, kw, ",")
+			for (i = 1; i <= n; i++) { gsub(/^ +| +$/, "", kw[i]) }
+		}
+		{
+			name = ""
+			p = index($0, "#")
+			if (p) {
+				s = substr($0, p + 1); gsub(/\+/, " ", s)
+				while (match(s, /%[0-9A-Fa-f][0-9A-Fa-f]/)) {
+					name = name substr(s, 1, RSTART - 1) sprintf("%c", hex[toupper(substr(s, RSTART + 1, 2))])
+					s = substr(s, RSTART + 3)
+				}
+				name = name s
+			}
+			for (i = 1; i <= n; i++) if (kw[i] != "" && index(name, kw[i])) next
+			print
+		}
+	' "$file" > "${file}.exc"
+	mv "${file}.exc" "$file"
+	after="$(grep -c '' "$file")"
+	[ "$before" = "$after" ] || log "dropping $((before - after)) node(s) matching exclude keywords"
+}
+
 collect_links_from_file() {
 	local input="$1"
 	local output="$2"
@@ -564,6 +599,8 @@ update_one() {
 	config_get test_interval "$section" test_interval "1m"
 	config_get test_tolerance "$section" test_tolerance "50"
 	config_get supported_transports "$section" supported_transports "tcp,raw,ws,grpc"
+	local exclude_keywords
+	config_get exclude_keywords "$section" exclude_keywords "$DEFAULT_EXCLUDE"
 
 	[ -n "$url" ] || die "subscription '$section' has empty url"
 
@@ -572,14 +609,31 @@ update_one() {
 	links="${TMP_ROOT}/${section}.links"
 
 	log "updating subscription '$section' into podkop section '$podkop_section'"
-	fetch_subscription "$url" "$body" "$user_agent" "$hwid" || die "failed to fetch subscription '$section'"
-	collect_links_from_file "$body" "$links" "$supported_transports"
+	# url may be a list: config_get joins list items with spaces (URLs have
+	# none). Merge all of them; one dead subscription must not drop the others.
+	: > "$links"
+	local u n_url=0
+	for u in $url; do
+		n_url=$((n_url + 1))
+		if ! fetch_subscription "$u" "$body" "$user_agent" "$hwid"; then
+			log "subscription '$section' #$n_url: fetch failed, skipping"
+			continue
+		fi
+		collect_links_from_file "$body" "${links}.one" "$supported_transports"
+		cat "${links}.one" >> "$links"
+	done
+	rm -f "${links}.one"
+	sort -u -o "$links" "$links"
+	filter_excluded "$links" "$exclude_keywords"
 	[ -s "$links" ] || die "subscription '$section' produced no supported nodes"
 
 	count="$(write_links_to_podkop "$podkop_section" "$podkop_mode" "$links" "$max_nodes" "$test_url" "$test_interval" "$test_tolerance")"
 	log "wrote $count node(s) into podkop section '$podkop_section'"
 
 	rm -f "$body" "$links"
+	# marker: the speedtest must see a config rebuilt after this point, not a
+	# stale one that happens to have the same node count
+	touch "${TMP_ROOT}/${section}.updated"
 
 	if [ "$restart_podkop" -eq 1 ] && [ -x /etc/init.d/podkop ]; then
 		/etc/init.d/podkop restart
@@ -590,22 +644,31 @@ update_one() {
 	config_get_bool st_enabled "$section" speedtest_enabled 0
 	config_get st_interval "$section" speedtest_interval "off"
 	if [ "$st_enabled" -eq 1 ] && [ "$st_interval" = "after_update" ]; then
-		if wait_podkop_ready "$podkop_section" "$count" 30; then
-			speedtest_one "$section"
-		else
-			log "speedtest skipped: podkop did not rebuild $count node(s) in time"
-		fi
+		# detached: podkop needs ~1 min to rebuild and the test ~25 min, LuCI's
+		# "update now" call must not wait for that
+		(
+			if wait_podkop_ready "$podkop_section" "$count" 180 "${TMP_ROOT}/${section}.updated"; then
+				speedtest_one "$section"
+			else
+				log "speedtest skipped: podkop did not rebuild $count node(s) in time"
+			fi
+		) </dev/null >/dev/null 2>&1 &
 	fi
 }
 
 # Poll podkop's generated sing-box config until it exposes the expected number of
 # outbounds for a section (it is rebuilt asynchronously on restart).
 wait_podkop_ready() {
-	local section="$1" expected="$2" deadline="${3:-30}"
+	local section="$1" expected="$2" deadline="${3:-30}" marker="${4:-}"
 	local config_path have i=0
 
 	config_path="$(podkop_config_path)"
 	while [ "$i" -lt "$deadline" ]; do
+		if [ -n "$marker" ] && [ -z "$(find "$config_path" -newer "$marker" 2>/dev/null)" ]; then
+			i=$((i + 1))
+			sleep 1
+			continue
+		fi
 		have="$(jq -r --arg s "$section" \
 			'[.outbounds[] | .tag // empty
 			  | select(startswith($s+"-") and endswith("-out"))
@@ -787,6 +850,10 @@ speedtest_one() {
 		i=$((i + 1))
 		tag="${podkop_section}-${i}-out"
 		mbps="$(speedtest_node "$config_path" "$tag" "$url" "$timeout")"
+		# slow but alive: one retry, a single dip shouldn't cost the node its place
+		if [ "${mbps:-0}" -gt 0 ] && [ "${mbps:-0}" -lt "$min_mbps" ] 2>/dev/null; then
+			mbps="$(speedtest_node "$config_path" "$tag" "$url" "$timeout")"
+		fi
 		if [ "${mbps:-0}" -ge "$min_mbps" ] 2>/dev/null; then
 			printf '%s\n' "$link" >> "$survivors"
 			kept=$((kept + 1))
