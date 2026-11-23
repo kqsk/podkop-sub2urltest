@@ -677,7 +677,9 @@ update_one() {
 	[ -s "$links" ] || die "subscription '$section' produced no supported nodes"
 
 	config_get_bool st_enabled "$section" speedtest_enabled 0
-	if [ "$st_enabled" -eq 1 ]; then
+	# preflight reuses Podkop's own link parser; older Podkop builds lack it and
+	# fall back to the post-import speedtest below
+	if [ "$st_enabled" -eq 1 ] && [ -f /usr/lib/podkop/sing_box_config_facade.sh ]; then
 		preflight_links "$section" "$links" || return 1
 		preflight_done=1
 	fi

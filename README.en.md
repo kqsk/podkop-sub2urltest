@@ -25,12 +25,16 @@ It does not log subscription URLs or proxy links.
 
 ### Easiest install from GitHub
 
-Requires OpenWrt with Podkop already installed. Run on the router (SSH as root):
+Works on any OpenWrt (older `opkg` releases and 25+ with `apk`); needs
+[Podkop](https://github.com/itdoginfo/podkop) installed. SSH into the router
+(`ssh root@192.168.1.1`) and paste one line:
 
 ```sh
-wget -O /tmp/podkop-sub2urltest-install.sh https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main/remote-install.sh
-ash /tmp/podkop-sub2urltest-install.sh
+wget -qO- https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main/remote-install.sh | ash
 ```
+
+It asks for the subscription URL (Enter skips; set it later in LuCI). If Podkop
+is missing, it stops and prints the command to install it.
 
 The installer asks for the subscription URL, writes it to
 `/etc/config/podkop-sub2urltest`, runs the first update, and enables periodic

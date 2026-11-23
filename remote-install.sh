@@ -36,8 +36,14 @@ ensure_deps() {
 	command -v jq >/dev/null 2>&1 || missing="$missing jq"
 	command -v base64 >/dev/null 2>&1 || missing="$missing coreutils-base64"
 	command -v uci >/dev/null 2>&1 || missing="$missing uci"
+	command -v curl >/dev/null 2>&1 || missing="$missing curl"
+	command -v flock >/dev/null 2>&1 || missing="$missing flock"
 
-	command -v podkop >/dev/null 2>&1 || die "podkop is not installed: install Podkop first"
+	if ! command -v podkop >/dev/null 2>&1; then
+		log "Podkop is not installed. Install it first (official installer), then run this again:"
+		log "  wget -O /tmp/podkop-install.sh https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh && sh /tmp/podkop-install.sh"
+		exit 1
+	fi
 
 	if [ -n "$missing" ]; then
 		log "Installing missing dependencies:$missing"
@@ -54,6 +60,8 @@ ensure_deps() {
 	command -v jq >/dev/null 2>&1 || die "jq is missing"
 	command -v base64 >/dev/null 2>&1 || die "base64 is missing"
 	command -v uci >/dev/null 2>&1 || die "uci is missing"
+	command -v curl >/dev/null 2>&1 || die "curl is missing"
+	command -v flock >/dev/null 2>&1 || die "flock is missing"
 }
 
 prompt_subscription_url() {
@@ -61,11 +69,12 @@ prompt_subscription_url() {
 		return 0
 	fi
 
-	if [ -t 0 ]; then
+	# stdin is the script itself when run as "wget -qO- ... | ash": ask on the terminal
+	if ( : </dev/tty ) 2>/dev/null; then
 		log ""
 		log "Paste subscription URL, or press Enter to configure it later."
 		printf 'Subscription URL: '
-		read -r SUB_URL
+		read -r SUB_URL </dev/tty || SUB_URL=""
 	fi
 }
 
@@ -142,7 +151,7 @@ configure_subscription() {
 	log "Subscription URL saved. Updating Podkop..."
 	/usr/bin/podkop-sub2urltest update main
 	/etc/init.d/podkop-sub2urltest restart
-	log "Done."
+	log "Done. Settings: LuCI -> Services -> Podkop Subscriptions"
 }
 
 case "$BASE" in
@@ -151,8 +160,15 @@ case "$BASE" in
 		;;
 esac
 
-ensure_deps
-prompt_subscription_url
-install_files
-configure_subscription
-rm -rf "$TMP_DIR"
+# One function call on the last line: when piped ("wget -qO- ... | ash") the
+# shell has read the whole script before anything runs, so no command can
+# swallow the rest of it from stdin.
+main() {
+	ensure_deps
+	prompt_subscription_url
+	install_files
+	configure_subscription
+	rm -rf "$TMP_DIR"
+}
+
+main "$@"

@@ -36,14 +36,18 @@ Subscription URL и сами ноды в лог **не пишутся**.
 
 ### Проще всего — с GitHub
 
-Нужен OpenWrt с уже установленным Podkop. На роутере (SSH под root):
+Подходит любой OpenWrt (старые на `opkg` и 25+ на `apk`), нужен уже
+установленный [Podkop](https://github.com/itdoginfo/podkop). Зайти на роутер по
+SSH (`ssh root@192.168.1.1`) и вставить одну строку:
 
 ```sh
-wget -O /tmp/podkop-sub2urltest-install.sh https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main/remote-install.sh
-ash /tmp/podkop-sub2urltest-install.sh
+wget -qO- https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main/remote-install.sh | ash
 ```
 
-Установщик ставит зависимости, спрашивает ссылку-подписку, пишет её в
+Установщик спросит ссылку-подписку (можно пропустить Enter и вписать потом в
+LuCI). Если Podkop не стоит — скрипт остановится и покажет команду его установки.
+
+Установщик ставит зависимости, пишет ссылку-подписку в
 `/etc/config/podkop-sub2urltest`, делает первый импорт и включает периодические
 обновления. Потом всё настраивается в LuCI: **Службы → Podkop Subscriptions**.
 

@@ -5,8 +5,7 @@ Repo: https://github.com/kqsk/podkop-sub2urltest
 ## End-user install (share this)
 
 ```sh
-wget -O /tmp/podkop-sub2urltest-install.sh https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main/remote-install.sh
-ash /tmp/podkop-sub2urltest-install.sh
+wget -qO- https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main/remote-install.sh | ash
 ```
 
 The installer asks for the subscription URL, writes config, runs the first
