@@ -69,8 +69,9 @@ cp "$ROOT/files/usr/share/rpcd/acl.d/luci-app-podkop-sub2urltest.json" /usr/shar
 chmod 0644 /usr/share/rpcd/acl.d/luci-app-podkop-sub2urltest.json
 
 /etc/init.d/podkop-sub2urltest enable
+/etc/init.d/podkop-sub2urltest restart
 /etc/init.d/rpcd reload 2>/dev/null || /etc/init.d/rpcd restart 2>/dev/null || true
-rm -rf /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null || true
+rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache 2>/dev/null || true
 
 cat <<'EOF'
 podkop-sub2urltest installed.

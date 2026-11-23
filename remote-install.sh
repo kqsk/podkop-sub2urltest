@@ -125,8 +125,9 @@ install_files() {
 	chmod 0644 /usr/share/rpcd/acl.d/luci-app-podkop-sub2urltest.json
 
 	/etc/init.d/podkop-sub2urltest enable
+	/etc/init.d/podkop-sub2urltest restart
 	/etc/init.d/rpcd reload 2>/dev/null || /etc/init.d/rpcd restart 2>/dev/null || true
-	rm -rf /tmp/luci-indexcache /tmp/luci-modulecache 2>/dev/null || true
+	rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache 2>/dev/null || true
 }
 
 configure_subscription() {
@@ -151,7 +152,7 @@ configure_subscription() {
 	log "Subscription URL saved. Updating Podkop..."
 	/usr/bin/podkop-sub2urltest update main
 	/etc/init.d/podkop-sub2urltest restart
-	log "Done. Settings: LuCI -> Services -> Podkop Subscriptions"
+	log "Done. Settings: LuCI -> Службы -> Подписки Podkop"
 }
 
 case "$BASE" in
