@@ -32,7 +32,8 @@ done
 if [ -n "$missing" ]; then
 	echo "missing runtime command(s):$missing" >&2
 	echo "install dependencies first, usually:" >&2
-	echo "  opkg update && opkg install jq coreutils-base64 ca-bundle" >&2
+	echo "  apk update && apk add jq coreutils-base64 ca-bundle    (OpenWrt 25+)" >&2
+	echo "  opkg update && opkg install jq coreutils-base64 ca-bundle    (older)" >&2
 	exit 1
 fi
 

@@ -37,10 +37,18 @@ ensure_deps() {
 	command -v base64 >/dev/null 2>&1 || missing="$missing coreutils-base64"
 	command -v uci >/dev/null 2>&1 || missing="$missing uci"
 
-	if [ -n "$missing" ] && command -v opkg >/dev/null 2>&1; then
+	command -v podkop >/dev/null 2>&1 || die "podkop is not installed: install Podkop first"
+
+	if [ -n "$missing" ]; then
 		log "Installing missing dependencies:$missing"
-		opkg update
-		opkg install $missing ca-bundle
+		if command -v apk >/dev/null 2>&1; then
+			# OpenWrt 25.x and newer
+			apk update
+			apk add $missing ca-bundle
+		elif command -v opkg >/dev/null 2>&1; then
+			opkg update
+			opkg install $missing ca-bundle
+		fi
 	fi
 
 	command -v jq >/dev/null 2>&1 || die "jq is missing"

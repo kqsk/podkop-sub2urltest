@@ -36,7 +36,7 @@ Subscription URL и сами ноды в лог **не пишутся**.
 
 ### Проще всего — с GitHub
 
-На роутере OpenWrt (SSH под root):
+Нужен OpenWrt с уже установленным Podkop. На роутере (SSH под root):
 
 ```sh
 wget -O /tmp/podkop-sub2urltest-install.sh https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main/remote-install.sh
@@ -45,7 +45,7 @@ ash /tmp/podkop-sub2urltest-install.sh
 
 Установщик ставит зависимости, спрашивает ссылку-подписку, пишет её в
 `/etc/config/podkop-sub2urltest`, делает первый импорт и включает периодические
-обновления.
+обновления. Потом всё настраивается в LuCI: **Службы → Podkop Subscriptions**.
 
 Без интерактива (ссылка через переменную окружения):
 
@@ -69,17 +69,19 @@ ash install.sh
 Либо скопировать файлы по отдельности:
 
 ```sh
-scp files/usr/bin/podkop-sub2urltest root@192.168.1.10:/usr/bin/
-scp files/etc/config/podkop-sub2urltest root@192.168.1.10:/etc/config/
-scp files/etc/init.d/podkop-sub2urltest root@192.168.1.10:/etc/init.d/
-ssh root@192.168.1.10 'chmod +x /usr/bin/podkop-sub2urltest /etc/init.d/podkop-sub2urltest'
+scp files/usr/bin/podkop-sub2urltest root@192.168.1.1:/usr/bin/
+scp files/etc/config/podkop-sub2urltest root@192.168.1.1:/etc/config/
+scp files/etc/init.d/podkop-sub2urltest root@192.168.1.1:/etc/init.d/
+ssh root@192.168.1.1 'chmod +x /usr/bin/podkop-sub2urltest /etc/init.d/podkop-sub2urltest'
 ```
 
 Зависимости:
 
 ```sh
-opkg update
-opkg install jq coreutils-base64 ca-bundle
+# OpenWrt 25 и новее
+apk update && apk add jq coreutils-base64 ca-bundle
+# OpenWrt 24 и старше
+opkg update && opkg install jq coreutils-base64 ca-bundle
 ```
 
 ## Настройка

@@ -25,7 +25,7 @@ It does not log subscription URLs or proxy links.
 
 ### Easiest install from GitHub
 
-Run this on the OpenWrt router (SSH as root):
+Requires OpenWrt with Podkop already installed. Run on the router (SSH as root):
 
 ```sh
 wget -O /tmp/podkop-sub2urltest-install.sh https://raw.githubusercontent.com/kqsk/podkop-sub2urltest/main/remote-install.sh
@@ -65,17 +65,19 @@ ash install.sh
 Or copy the files manually:
 
 ```sh
-scp files/usr/bin/podkop-sub2urltest root@192.168.1.10:/usr/bin/
-scp files/etc/config/podkop-sub2urltest root@192.168.1.10:/etc/config/
-scp files/etc/init.d/podkop-sub2urltest root@192.168.1.10:/etc/init.d/
-ssh root@192.168.1.10 'chmod +x /usr/bin/podkop-sub2urltest /etc/init.d/podkop-sub2urltest'
+scp files/usr/bin/podkop-sub2urltest root@192.168.1.1:/usr/bin/
+scp files/etc/config/podkop-sub2urltest root@192.168.1.1:/etc/config/
+scp files/etc/init.d/podkop-sub2urltest root@192.168.1.1:/etc/init.d/
+ssh root@192.168.1.1 'chmod +x /usr/bin/podkop-sub2urltest /etc/init.d/podkop-sub2urltest'
 ```
 
 Install runtime dependencies:
 
 ```sh
-opkg update
-opkg install jq coreutils-base64 ca-bundle
+# OpenWrt 25 and newer
+apk update && apk add jq coreutils-base64 ca-bundle
+# OpenWrt 24 and older
+opkg update && opkg install jq coreutils-base64 ca-bundle
 ```
 
 ## Configure
