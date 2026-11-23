@@ -1,5 +1,7 @@
 #!/bin/ash
 
+umask 077
+
 CONFIG_NAME="podkop-sub2urltest"
 PODKOP_CONFIG="podkop"
 TMP_ROOT="/tmp/podkop-sub2urltest.d"
@@ -483,7 +485,7 @@ fetch_subscription() {
 		set -- -fsSL -A "$user_agent" \
 			-H "$h_os" -H "$h_ver" -H "$h_model" -H "$h_locale"
 		[ -n "$hwid" ] && set -- "$@" -H "X-Hwid: $hwid"
-		curl "$@" "$url" -o "$output"
+		curl --connect-timeout 10 --max-time 60 "$@" "$url" -o "$output"
 	elif command -v wget >/dev/null 2>&1 && wget --help 2>&1 | grep -q -- '--header'; then
 		set -- -q -O "$output" --user-agent="$user_agent" \
 			--header="$h_os" --header="$h_ver" --header="$h_model" --header="$h_locale"
@@ -578,11 +580,58 @@ write_links_to_podkop() {
 	printf '%s\n' "$count"
 }
 
+
+# Validate candidates in isolated loopback SOCKS processes BEFORE publishing.
+# Failed candidates never replace the working UCI pool. No live service restart.
+preflight_links() {
+    local section="$1" links="$2" min_mbps url timeout link cfg tag mbps pass=0 fail=0
+    local out="${TMP_ROOT}/${section}.preflight.keep" node="${TMP_ROOT}/${section}.preflight.json"
+    config_get min_mbps "$section" speedtest_min_mbps 20
+    config_get url "$section" speedtest_url "https://speed.cloudflare.com/__down?bytes=10000000"
+    config_get timeout "$section" speedtest_timeout 10
+    SPEEDTEST_PORT="$(pick_free_port)"
+    : > "$out"
+    log "preflight '$section': testing candidates before import, keep >= $min_mbps Mbit/s"
+    while IFS= read -r link; do
+        [ -n "$link" ] || continue
+        # Parse using the SAME installed Podkop parser, without changing UCI.
+        cfg="$(
+            . /usr/lib/podkop/constants.sh
+            . /usr/lib/podkop/sing_box_config_facade.sh
+            log() { return 0; }
+            sing_box_cf_add_proxy_outbound '{"outbounds":[]}' preflight "$link" 0
+        )" || cfg=''
+        if ! printf '%s' "$cfg" | jq -e '.outbounds[0].server' >/dev/null 2>&1; then
+            fail=$((fail + 1)); continue
+        fi
+        printf '%s\n' "$cfg" > "$node"
+        tag=preflight-out
+        mbps="$(speedtest_node "$node" "$tag" "$url" "$timeout")"
+        # Retry failures as well as slow results: one transient fault is not a ban.
+        if [ "${mbps:-0}" -lt "$min_mbps" ] 2>/dev/null; then
+            mbps="$(speedtest_node "$node" "$tag" "$url" "$timeout")"
+        fi
+        if [ "${mbps:-0}" -ge "$min_mbps" ] 2>/dev/null; then
+            printf '%s\n' "$link" >> "$out"; pass=$((pass + 1))
+        else
+            fail=$((fail + 1))
+        fi
+    done < "$links"
+    rm -f "$node"
+    log "preflight '$section': kept $pass, rejected $fail"
+    if [ "$pass" -eq 0 ]; then
+        rm -f "$out"
+        log "preflight: no verified candidates; leaving current live configuration unchanged"
+        return 1
+    fi
+    mv "$out" "$links"
+}
+
 update_one() {
 	local section="$1"
 	local enabled url podkop_section podkop_mode user_agent restart_podkop hwid
 	local max_nodes test_url test_interval test_tolerance body links count
-	local supported_transports
+	local supported_transports preflight_done=0 st_enabled=0 config_before
 
 	config_get_bool enabled "$section" enabled 0
 	[ "$enabled" -eq 1 ] || return 0
@@ -627,6 +676,12 @@ update_one() {
 	filter_excluded "$links" "$exclude_keywords"
 	[ -s "$links" ] || die "subscription '$section' produced no supported nodes"
 
+	config_get_bool st_enabled "$section" speedtest_enabled 0
+	if [ "$st_enabled" -eq 1 ]; then
+		preflight_links "$section" "$links" || return 1
+		preflight_done=1
+	fi
+	config_before="$(sha256sum /etc/config/podkop | cut -d ' ' -f 1)"
 	count="$(write_links_to_podkop "$podkop_section" "$podkop_mode" "$links" "$max_nodes" "$test_url" "$test_interval" "$test_tolerance")"
 	log "wrote $count node(s) into podkop section '$podkop_section'"
 
@@ -635,15 +690,15 @@ update_one() {
 	# stale one that happens to have the same node count
 	touch "${TMP_ROOT}/${section}.updated"
 
-	if [ "$restart_podkop" -eq 1 ] && [ -x /etc/init.d/podkop ]; then
+	if [ "$restart_podkop" -eq 1 ] && [ -x /etc/init.d/podkop ] && [ "$config_before" != "$(sha256sum /etc/config/podkop | cut -d ' ' -f 1)" ]; then
 		/etc/init.d/podkop restart
 	fi
 
 	# Optional: speed-test right after import and prune slow nodes.
-	local st_enabled st_interval
+	local st_interval
 	config_get_bool st_enabled "$section" speedtest_enabled 0
 	config_get st_interval "$section" speedtest_interval "off"
-	if [ "$st_enabled" -eq 1 ] && [ "$st_interval" = "after_update" ]; then
+	if [ "$preflight_done" -eq 0 ] && [ "$st_enabled" -eq 1 ] && [ "$st_interval" = "after_update" ]; then
 		# detached: podkop needs ~1 min to rebuild and the test ~25 min, LuCI's
 		# "update now" call must not wait for that
 		# 1000>&-: drop the procd service lock fd inherited from reload, or LuCI save hangs until the speedtest ends
@@ -740,7 +795,7 @@ speedtest_node() {
 	local tmp="${TMP_ROOT}/st.$$.json" pid sp i ready
 
 	jq -c --arg t "$tag" \
-		'{log:{level:"fatal"},inbounds:[{type:"mixed",listen:"127.0.0.1",listen_port:('"$SPEEDTEST_PORT"')}],outbounds:[(.outbounds[]|select(.tag==$t))]}' \
+		'{dns:{servers:[{type:"udp",tag:"preflight-dns",server:"8.8.4.4"}]},route:{default_domain_resolver:"preflight-dns"},log:{level:"fatal"},inbounds:[{type:"mixed",listen:"127.0.0.1",listen_port:('"$SPEEDTEST_PORT"')}],outbounds:[(.outbounds[]|select(.tag==$t))]}' \
 		"$config_path" > "$tmp" 2>/dev/null
 	if [ ! -s "$tmp" ] || ! grep -q '"server"' "$tmp"; then
 		rm -f "$tmp"
@@ -750,12 +805,13 @@ speedtest_node() {
 
 	sing-box run -c "$tmp" >/dev/null 2>&1 &
 	pid=$!
+	trap 'kill "$pid" 2>/dev/null; rm -f "$tmp"; exit 1' HUP INT TERM
 
 	ready=0
 	i=0
-	while [ "$i" -lt 8 ]; do
-		if curl -s -x "socks5h://127.0.0.1:${SPEEDTEST_PORT}" -o /dev/null \
-			--max-time 2 "http://cp.cloudflare.com/generate_204" 2>/dev/null; then
+	while [ "$i" -lt 2 ]; do
+		if curl -fsS --connect-timeout 3 -x "socks5h://127.0.0.1:${SPEEDTEST_PORT}" -o /dev/null \
+			--max-time 4 "http://cp.cloudflare.com/generate_204" 2>/dev/null; then
 			ready=1
 			break
 		fi
@@ -765,15 +821,16 @@ speedtest_node() {
 
 	sp=0
 	if [ "$ready" = 1 ]; then
-		sp="$(curl -s -x "socks5h://127.0.0.1:${SPEEDTEST_PORT}" -o /dev/null \
-			-w '%{speed_download}' --max-time "$timeout" "$url" 2>/dev/null)"
+		sp="$(curl -fLsS --connect-timeout 4 -x "socks5h://127.0.0.1:${SPEEDTEST_PORT}" -o /dev/null \
+			-w '%{speed_download} %{size_download} %{http_code}' --max-time "$timeout" "$url" 2>/dev/null)"
 	fi
 
 	kill "$pid" 2>/dev/null
 	wait "$pid" 2>/dev/null
+	trap - HUP INT TERM
 	rm -f "$tmp"
 
-	awk -v s="${sp:-0}" 'BEGIN { printf "%d\n", s * 8 / 1000000 }'
+	printf '%s\n' "${sp:-0}" | awk '{ if ($3 == 200 && $2 >= 1000000) printf "%d\n", $1 * 8 / 1000000; else print 0 }'
 }
 
 speedtest_one() {
@@ -852,7 +909,7 @@ speedtest_one() {
 		tag="${podkop_section}-${i}-out"
 		mbps="$(speedtest_node "$config_path" "$tag" "$url" "$timeout")"
 		# slow but alive: one retry, a single dip shouldn't cost the node its place
-		if [ "${mbps:-0}" -gt 0 ] && [ "${mbps:-0}" -lt "$min_mbps" ] 2>/dev/null; then
+		if [ "${mbps:-0}" -lt "$min_mbps" ] 2>/dev/null; then
 			mbps="$(speedtest_node "$config_path" "$tag" "$url" "$timeout")"
 		fi
 		if [ "${mbps:-0}" -ge "$min_mbps" ] 2>/dev/null; then
@@ -936,6 +993,21 @@ daemon_cmd() {
 		sleep "$sleep_for"
 	done
 }
+
+# Keep LuCI/procd reload responsive while candidates are tested in isolation.
+if [ "${1:-}" = update ] && [ "${PODKOP_UPDATER_FOREGROUND:-0}" != 1 ]; then
+    ( PODKOP_UPDATER_FOREGROUND=1 "$0" "$@" ) </dev/null >/dev/null 2>&1 1000>&- &
+    log "update queued in background (candidate preflight before publication)"
+    exit 0
+fi
+
+# Serialize updating/pruning operations; health monitoring has its own lock.
+case "${1:-}" in
+    update|speedtest)
+        exec 8>/var/lock/podkop-sub2urltest.operation.lock
+        flock -n 8 || { log "another update/test is active; skipping"; exit 0; }
+        ;;
+esac
 
 case "${1:-}" in
 	update)
