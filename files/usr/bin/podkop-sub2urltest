@@ -411,6 +411,45 @@ filter_transports() {
 	mv "${file}.flt" "$file"
 }
 
+# sing-box only knows a fixed set of uTLS fingerprints; one unknown `fp=` (e.g.
+# Xray-style "HelloChrome_133") fails `sing-box check` and podkop aborts the
+# whole config. Xray names "Hello<Name>_<ver>" are mapped to "<name>" when
+# sing-box supports it; anything else unknown drops the link.
+filter_fingerprints() {
+	local file="$1"
+
+	awk '
+		BEGIN {
+			n = split("chrome firefox edge safari 360 qq ios android random randomized", a, " ")
+			for (i = 1; i <= n; i++) ok[a[i]] = 1
+		}
+		{
+			if (!match($0, /[?&]fp=[^&#]*/)) { print; next }
+			pre = substr($0, 1, RSTART - 1)
+			sep = substr($0, RSTART, 1)
+			fp = substr($0, RSTART + 4, RLENGTH - 4)
+			post = substr($0, RSTART + RLENGTH)
+			if (fp in ok) { print; next }
+			norm = tolower(fp)
+			sub(/^hello/, "", norm)
+			sub(/_.*$/, "", norm)
+			if (norm in ok) {
+				print pre sep "fp=" norm post
+				mapped[fp]++
+			} else {
+				dropped[fp]++
+			}
+		}
+		END {
+			for (k in mapped)
+				printf "mapping %d node(s) with fingerprint %s to a sing-box one\n", mapped[k], k > "/dev/stderr"
+			for (k in dropped)
+				printf "dropping %d node(s) with unsupported fingerprint %s\n", dropped[k], k > "/dev/stderr"
+		}
+	' "$file" > "${file}.fp" 2>>"${TMP_ROOT}/filter.log"
+	mv "${file}.fp" "$file"
+}
+
 # filter_excluded FILE "kw1,kw2,..." -> drops links whose name (#fragment,
 # URL-decoded) contains any keyword. Case-sensitive: busybox has no unicode
 # case folding, so list both "Обход" and "обход" if needed.
@@ -464,6 +503,7 @@ collect_links_from_file() {
 	awk 'NF && !seen[$0]++' "$output" > "${output}.dedup"
 	mv "${output}.dedup" "$output"
 	filter_transports "$output" "$allowed_transports"
+	filter_fingerprints "$output"
 	[ -f "${TMP_ROOT}/filter.log" ] && { while IFS= read -r l; do log "$l"; done < "${TMP_ROOT}/filter.log"; rm -f "${TMP_ROOT}/filter.log"; }
 	rm -f "$decoded"
 }
